@@ -125,25 +125,34 @@ def delete_user(
 @router.get("/seller")
 def get_seller_dashboard(db: Session = Depends(get_db), seller: User = Depends(check_role(['seller']))):
     items = db.query(OrderItem).filter_by(seller_id=seller.id).all()
-    total_revenue = sum(
-        (it.discount_price if it.discount_price else it.price) * it.quantity 
-        for it in items
-    )
     
-    total_sold = sum(it.quantity for it in items)
+    # Calculate total revenue for this seller's products (matching order status processing/shipped/delivered)
+    total_revenue = 0.0
+    for item in items:
+        if item.order and item.order.status in ['processing', 'shipped', 'delivered']:
+            price = item.discount_price if item.discount_price else item.price
+            total_revenue += price * item.quantity
+            
+    total_units_sold = sum(item.quantity for item in items)
     
     products = db.query(Product).filter_by(seller_id=seller.id).all()
+    total_listings = len(products)
     out_of_stock = sum(1 for p in products if p.stock_count == 0)
     low_stock = sum(1 for p in products if 0 < p.stock_count < 10)
+    in_stock = total_listings - out_of_stock - low_stock
+    
+    low_stock_list = [p.to_dict() for p in products if p.stock_count < 10]
     
     return {
+        'total_listings': total_listings,
+        'total_units_sold': total_units_sold,
         'total_revenue': round(total_revenue, 2),
-        'total_sold': total_sold,
         'stock_summary': {
             'out_of_stock': out_of_stock,
             'low_stock': low_stock,
-            'total_products': len(products)
-        }
+            'in_stock': in_stock
+        },
+        'low_stock_products': low_stock_list
     }
 
 @router.get("/notifications")
