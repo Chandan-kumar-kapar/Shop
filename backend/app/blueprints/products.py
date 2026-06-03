@@ -61,6 +61,8 @@ def upload_image(image: UploadFile, product_id: int) -> str:
                     print(f" * GitHub upload failed ({response.status_code}): {response.text}")
         except Exception as e:
             print(f" * Error uploading to GitHub: {e}")
+    else:
+        print(f" * GitHub upload skipped: GITHUB_TOKEN={bool(github_token)}, owner={owner}, repo={repo}")
             
     # Fallback to local file upload if GitHub failed or credentials are missing
     print(" * Falling back to local upload folder.")
