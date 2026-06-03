@@ -35,7 +35,9 @@ def get_recommendations(
             rec_query = db.query(Product).filter(Product.category_id.in_(category_ids))
             if browsed_prod_ids:
                 rec_query = rec_query.filter(Product.id.notin_(browsed_prod_ids))
-            recommended_products = rec_query.order_by(Product.rating.desc()).limit(limit).all()
+            in_cat_products = rec_query.all()
+            in_cat_products.sort(key=lambda p: p.rating, reverse=True)
+            recommended_products = in_cat_products[:limit]
             
         # Add recently viewed products to recommendations list if we need more
         if len(recommended_products) < limit and browsed_prod_ids:
@@ -53,7 +55,9 @@ def get_recommendations(
         if already_recommended_ids:
             trending_query = trending_query.filter(Product.id.notin_(already_recommended_ids))
             
-        trending = trending_query.order_by(Product.rating.desc(), Product.created_at.desc()).limit(remaining_limit).all()
+        all_trending = trending_query.all()
+        all_trending.sort(key=lambda p: (p.rating, p.created_at.timestamp() if p.created_at else 0), reverse=True)
+        trending = all_trending[:remaining_limit]
         recommended_products.extend(trending)
         
     return [p.to_dict() for p in recommended_products[:limit]]
@@ -69,17 +73,18 @@ def get_related_products(
         raise HTTPException(status_code=404, detail='Product not found')
         
     # Related products in the same category, excluding current product
-    related = db.query(Product).filter(Product.category_id == product.category_id, Product.id != product_id)\
-        .order_by(Product.rating.desc())\
-        .limit(limit).all()
+    related_query = db.query(Product).filter(Product.category_id == product.category_id, Product.id != product_id)
+    related = related_query.all()
+    related.sort(key=lambda p: p.rating, reverse=True)
+    related = related[:limit]
         
     # If not enough related in category, pad with top-rated items
     if len(related) < limit:
         already_ids = [p.id for p in related] + [product_id]
         remaining = limit - len(related)
-        padding = db.query(Product).filter(Product.id.notin_(already_ids))\
-            .order_by(Product.rating.desc())\
-            .limit(remaining).all()
-        related.extend(padding)
+        padding_query = db.query(Product).filter(Product.id.notin_(already_ids))
+        padding = padding_query.all()
+        padding.sort(key=lambda p: p.rating, reverse=True)
+        related.extend(padding[:remaining])
         
     return [p.to_dict() for p in related[:limit]]

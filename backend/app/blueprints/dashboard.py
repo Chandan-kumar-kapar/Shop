@@ -16,17 +16,27 @@ def get_admin_dashboard(db: Session = Depends(get_db), admin: User = Depends(che
     payments = db.query(Payment).all()
     total_revenue = sum(p.amount for p in payments)
     
+    total_users = db.query(User).count()
     total_customers = db.query(User).filter_by(role='customer').count()
     total_sellers = db.query(User).filter_by(role='seller').count()
     total_products = db.query(Product).count()
     total_orders = db.query(Order).count()
     
+    # Low stock alerts
+    low_stock = db.query(Product).filter(Product.stock_count < 10).all()
+    
+    # Pending sellers
+    pending_sellers = db.query(User).filter_by(role='seller', status='pending').all()
+    
     return {
-        'total_revenue': round(total_revenue, 2),
-        'total_customers': total_customers,
+        'total_users': total_users,
         'total_sellers': total_sellers,
+        'total_customers': total_customers,
         'total_products': total_products,
-        'total_orders': total_orders
+        'total_orders': total_orders,
+        'total_revenue': round(total_revenue, 2),
+        'low_stock_products': [p.to_dict() for p in low_stock],
+        'pending_sellers': [s.to_dict() for s in pending_sellers]
     }
 
 @router.get("/admin/users")
