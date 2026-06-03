@@ -129,8 +129,22 @@ export default function SellerDashboard() {
         setShowProductModal(false);
         setUploadedImage(null);
         setImagePreview(null);
+        setProductForm({
+          name: '',
+          title: '',
+          description: '',
+          price: '',
+          discount_price: '',
+          stock_count: '',
+          category_id: categories[0]?.id || '',
+          brand: '',
+          SKU: ''
+        });
         showToast("Product saved successfully!", "success");
         loadSellerData();
+        if (activeTab === 'add-product') {
+          setActiveTab('products');
+        }
       } else {
         const data = await res.json();
         showToast(data.message || "Failed to save product.", "error");

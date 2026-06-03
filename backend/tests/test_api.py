@@ -79,3 +79,47 @@ def test_get_products(client):
     assert response.status_code == 200
     data = response.json()
     assert isinstance(data, list)
+
+def test_create_product_success(client, db_session):
+    # 1. Register seller
+    client.post('/api/auth/register', json={
+        'email': 'seller_test@shop.com',
+        'password': 'password123',
+        'name': 'Test Seller',
+        'role': 'seller'
+    })
+    
+    # Approve seller in database
+    seller = db_session.query(User).filter_by(email='seller_test@shop.com').first()
+    seller.status = 'approved'
+    db_session.commit()
+    
+    # 2. Login
+    login_res = client.post('/api/auth/login', json={
+        'email': 'seller_test@shop.com',
+        'password': 'password123'
+    })
+    token = login_res.json()['token']
+    
+    # 3. Create product with empty values (mimicking React state before dropdown selection/typing)
+    headers = {"Authorization": f"Bearer {token}"}
+    payload = {
+        "name": "Test Product",
+        "title": "Sub Test Product",
+        "description": "This is a test description",
+        "price": "12.99",
+        "discount_price": "",
+        "stock_count": "",
+        "category_id": "",
+        "brand": "",
+        "SKU": ""
+    }
+    # Form data request
+    res = client.post("/api/products", data=payload, headers=headers)
+    assert res.status_code == 201
+    data = res.json()
+    assert data["product"]["name"] == "Test Product"
+    assert data["product"]["discount_price"] is None
+    assert data["product"]["stock_count"] == 0
+    assert data["product"]["category_id"] is not None
+    assert data["product"]["brand"] == ""

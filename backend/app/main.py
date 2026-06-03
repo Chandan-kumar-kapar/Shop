@@ -51,6 +51,8 @@ def health():
     db_type = engine.url.drivername
     return {"status": "healthy", "database": db_type}
 
+from fastapi.exceptions import RequestValidationError
+
 # Global HTTP Exceptions handler
 @app.exception_handler(HTTPException)
 def http_exception_handler(request, exc):
@@ -59,8 +61,19 @@ def http_exception_handler(request, exc):
         content={"message": exc.detail}
     )
 
+@app.exception_handler(RequestValidationError)
+def validation_exception_handler(request, exc):
+    print(" * Validation error details:")
+    print(exc.errors())
+    return JSONResponse(
+        status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+        content={"message": "Validation error", "detail": exc.errors()}
+    )
+
 @app.exception_handler(Exception)
 def general_exception_handler(request, exc):
+    import traceback
+    traceback.print_exc()
     return JSONResponse(
         status_code=500,
         content={"message": "Internal server error"}

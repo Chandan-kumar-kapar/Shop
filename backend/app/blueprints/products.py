@@ -6,10 +6,69 @@ from ..auth import get_current_user, check_role, get_optional_user_id
 from pydantic import BaseModel, Field
 import os
 import uuid
+import httpx
 from typing import Optional, List
 from werkzeug.utils import secure_filename
 
 router = APIRouter()
+
+def upload_image(image: UploadFile, product_id: int) -> str:
+    # Read image data
+    image_bytes = image.file.read()
+    image.file.seek(0)  # Reset file pointer
+    
+    github_token = os.environ.get("GITHUB_TOKEN")
+    github_repo = os.environ.get("GITHUB_REPO", "shop_product_Images")
+    github_username = os.environ.get("GITHUB_USERNAME")
+    
+    owner = github_username
+    repo = github_repo
+    if github_repo and "/" in github_repo:
+        parts = github_repo.split("/", 1)
+        owner = parts[0]
+        repo = parts[1]
+        
+    if github_token and owner and repo:
+        import base64
+        print(f" * Uploading image to GitHub repository {owner}/{repo}...")
+        clean_name = secure_filename(image.filename) if image.filename else "image.jpg"
+        unique_id = str(uuid.uuid4())[:8]
+        filename = f"prod_{product_id}_{unique_id}_{clean_name}"
+        path = f"images/{filename}"
+        
+        url = f"https://api.github.com/repos/{owner}/{repo}/contents/{path}"
+        headers = {
+            "Authorization": f"Bearer {github_token}",
+            "Accept": "application/vnd.github+json",
+            "X-GitHub-Api-Version": "2022-11-28"
+        }
+        
+        content_b64 = base64.b64encode(image_bytes).decode("utf-8")
+        payload = {
+            "message": f"Upload product {product_id} image {filename}",
+            "content": content_b64
+        }
+        
+        try:
+            with httpx.Client(timeout=30.0) as client:
+                response = client.put(url, headers=headers, json=payload)
+                if response.status_code in (200, 201):
+                    res_data = response.json()
+                    img_url = res_data["content"]["download_url"]
+                    print(f" * Successfully uploaded to GitHub: {img_url}")
+                    return img_url
+                else:
+                    print(f" * GitHub upload failed ({response.status_code}): {response.text}")
+        except Exception as e:
+            print(f" * Error uploading to GitHub: {e}")
+            
+    # Fallback to local file upload if GitHub failed or credentials are missing
+    print(" * Falling back to local upload folder.")
+    filename = f"prod_{product_id}_{secure_filename(image.filename)}"
+    filepath = os.path.join(UPLOAD_FOLDER, filename)
+    with open(filepath, "wb") as f:
+        f.write(image_bytes)
+    return f"/api/products/uploads/{filename}"
 
 class ReviewCreateSchema(BaseModel):
     rating: int = Field(..., ge=1, le=5)
@@ -64,21 +123,52 @@ def create_product(
     name: str = Form(...),
     title: str = Form(...),
     description: str = Form(...),
-    price: float = Form(...),
-    discount_price: Optional[float] = Form(None),
-    stock_count: int = Form(0),
-    category_id: int = Form(...),
-    brand: str = Form(...),
+    price: str = Form(...),
+    discount_price: Optional[str] = Form(None),
+    stock_count: str = Form("0"),
+    category_id: Optional[str] = Form(None),
+    brand: Optional[str] = Form(None),
     SKU: Optional[str] = Form(None),
     image: Optional[UploadFile] = File(None),
     image_urls: Optional[str] = Form(None),
     db: Session = Depends(get_db),
     user: User = Depends(check_role(['seller', 'admin']))
 ):
-    if not SKU:
+    if not SKU or not SKU.strip():
         SKU = f"SKU-{str(uuid.uuid4())[:8].upper()}"
         
-    category = db.query(Category).filter_by(id=category_id).first()
+    try:
+        price_val = float(price)
+    except ValueError:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail='Invalid price value'
+        )
+
+    try:
+        stock_count_val = int(stock_count) if stock_count and stock_count.strip() != "" else 0
+    except ValueError:
+        stock_count_val = 0
+
+    category_id_val = None
+    if category_id and category_id.strip() != "":
+        try:
+            category_id_val = int(category_id)
+        except ValueError:
+            pass
+
+    if category_id_val is None:
+        # Fallback to the first category in the database
+        first_cat = db.query(Category).order_by(Category.id.asc()).first()
+        if first_cat:
+            category_id_val = first_cat.id
+        else:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail='No categories exist in the database'
+            )
+
+    category = db.query(Category).filter_by(id=category_id_val).first()
     if not category:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -92,20 +182,23 @@ def create_product(
         )
         
     status_str = 'in_stock'
-    if stock_count == 0:
+    if stock_count_val == 0:
         status_str = 'out_of_stock'
-    elif stock_count < 10:
+    elif stock_count_val < 10:
         status_str = 'low_stock'
+        
+    discount_price_val = float(discount_price) if discount_price and discount_price.strip() != "" else None
+    brand_val = brand.strip() if brand else ""
         
     product = Product(
         name=name,
         title=title,
         description=description,
-        price=price,
-        discount_price=discount_price,
-        stock_count=stock_count,
-        category_id=category_id,
-        brand=brand,
+        price=price_val,
+        discount_price=discount_price_val,
+        stock_count=stock_count_val,
+        category_id=category_id_val,
+        brand=brand_val,
         seller_id=user.id,
         SKU=SKU,
         availability_status=status_str
@@ -114,11 +207,7 @@ def create_product(
     db.flush()
     
     if image and image.filename:
-        filename = f"prod_{product.id}_{secure_filename(image.filename)}"
-        filepath = os.path.join(UPLOAD_FOLDER, filename)
-        with open(filepath, "wb") as f:
-            f.write(image.file.read())
-        img_url = f"/api/products/uploads/{filename}"
+        img_url = upload_image(image, product.id)
         p_img = ProductImage(product_id=product.id, image_url=img_url)
         db.add(p_img)
         
@@ -171,10 +260,10 @@ def update_product(
     name: Optional[str] = Form(None),
     title: Optional[str] = Form(None),
     description: Optional[str] = Form(None),
-    price: Optional[float] = Form(None),
-    discount_price: Optional[str] = Form(None), # string to handle optional empty value
-    stock_count: Optional[int] = Form(None),
-    category_id: Optional[int] = Form(None),
+    price: Optional[str] = Form(None),
+    discount_price: Optional[str] = Form(None),
+    stock_count: Optional[str] = Form(None),
+    category_id: Optional[str] = Form(None),
     brand: Optional[str] = Form(None),
     SKU: Optional[str] = Form(None),
     image: Optional[UploadFile] = File(None),
@@ -197,36 +286,48 @@ def update_product(
     if name is not None: product.name = name
     if title is not None: product.title = title
     if description is not None: product.description = description
-    if price is not None: product.price = price
+    
+    if price is not None and price.strip() != "":
+        try:
+            product.price = float(price)
+        except ValueError:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail='Invalid price value'
+            )
     
     if discount_price is not None:
-        product.discount_price = float(discount_price) if discount_price != '' else None
+        product.discount_price = float(discount_price) if discount_price.strip() != "" else None
         
     if stock_count is not None:
-        product.stock_count = stock_count
-        if stock_count == 0:
-            product.availability_status = 'out_of_stock'
-        elif stock_count < 10:
-            product.availability_status = 'low_stock'
-        else:
-            product.availability_status = 'in_stock'
+        try:
+            stock_count_val = int(stock_count) if stock_count.strip() != "" else 0
+            product.stock_count = stock_count_val
+            if stock_count_val == 0:
+                product.availability_status = 'out_of_stock'
+            elif stock_count_val < 10:
+                product.availability_status = 'low_stock'
+            else:
+                product.availability_status = 'in_stock'
+        except ValueError:
+            pass
             
-    if category_id:
-        category = db.query(Category).filter_by(id=category_id).first()
-        if category:
-            product.category_id = category_id
+    if category_id is not None and category_id.strip() != "":
+        try:
+            cat_id_int = int(category_id)
+            category = db.query(Category).filter_by(id=cat_id_int).first()
+            if category:
+                product.category_id = cat_id_int
+        except ValueError:
+            pass
             
-    if brand is not None: product.brand = brand
+    if brand is not None: product.brand = brand.strip()
     if SKU is not None: product.SKU = SKU
     
     if image and image.filename:
         # Delete old images to keep it clean
         db.query(ProductImage).filter_by(product_id=product.id).delete()
-        filename = f"prod_{product.id}_{secure_filename(image.filename)}"
-        filepath = os.path.join(UPLOAD_FOLDER, filename)
-        with open(filepath, "wb") as f:
-            f.write(image.file.read())
-        img_url = f"/api/products/uploads/{filename}"
+        img_url = upload_image(image, product.id)
         p_img = ProductImage(product_id=product.id, image_url=img_url)
         db.add(p_img)
         
