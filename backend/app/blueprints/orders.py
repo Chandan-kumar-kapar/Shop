@@ -1,87 +1,92 @@
+from fastapi import APIRouter, Depends, HTTPException, status, Header
+from sqlalchemy.orm import Session
+from ..models import Order, OrderItem, Address, Cart, CartItem, Product, Payment, Notification, User
+from ..database import get_db
+from ..auth import decode_token, check_role, get_current_user
+from pydantic import BaseModel
 import datetime
 import random
 import string
-from flask import Blueprint, request, jsonify, g
-from ..models import Order, OrderItem, Address, Cart, CartItem, Product, Payment, Notification, User
-from ..database import db
-from ..auth import jwt_required, role_required, decode_token
+import uuid
+from typing import Optional, List
 
-orders_bp = Blueprint('orders', __name__)
+router = APIRouter()
+
+class ShippingAddressInputSchema(BaseModel):
+    full_name: str
+    address_line1: str
+    address_line2: Optional[str] = None
+    city: str
+    state: str
+    postal_code: str
+    country: Optional[str] = 'USA'
+    phone: str
+
+class PlaceOrderSchema(BaseModel):
+    session_id: Optional[str] = None
+    shipping_address_id: Optional[int] = None
+    shipping_address: Optional[ShippingAddressInputSchema] = None
+    payment_method: Optional[str] = 'card'
+
+class UpdateOrderStatusSchema(BaseModel):
+    status: str
 
 def generate_tracking_number():
     date_str = datetime.datetime.now().strftime("%Y%m%d")
     random_str = ''.join(random.choices(string.ascii_uppercase + string.digits, k=6))
     return f"SC-{date_str}-{random_str}"
 
-@orders_bp.route('', methods=['POST'])
-def place_order():
-    # Detect authentication if available
-    auth_header = request.headers.get('Authorization')
-    user_id = None
-    if auth_header:
+def get_optional_user_id(authorization: Optional[str] = Header(None)):
+    if authorization:
         try:
-            token = auth_header.split(" ")[1]
+            token = authorization.split(" ")[1]
             payload = decode_token(token)
             if 'error' not in payload:
-                user_id = payload['sub']
+                return payload['sub']
         except Exception:
             pass
+    return None
 
-    data = request.get_json() or {}
-    session_id = data.get('session_id')
-    payment_method = data.get('payment_method', 'card')
-    
+@router.post("", status_code=status.HTTP_201_CREATED)
+def place_order(
+    data: PlaceOrderSchema,
+    user_id: Optional[int] = Depends(get_optional_user_id),
+    db: Session = Depends(get_db)
+):
     # 1. Fetch Cart
     if user_id:
-        cart = Cart.query.filter_by(user_id=user_id).first()
-    elif session_id:
-        cart = Cart.query.filter_by(session_id=session_id).first()
+        cart = db.query(Cart).filter_by(user_id=user_id).first()
+    elif data.session_id:
+        cart = db.query(Cart).filter_by(session_id=data.session_id).first()
     else:
-        return jsonify({'message': 'Either authorization or session_id is required'}), 400
+        raise HTTPException(status_code=400, detail='Either authorization or session_id is required')
         
     if not cart or not cart.items:
-        return jsonify({'message': 'Your shopping cart is empty'}), 400
+        raise HTTPException(status_code=400, detail='Your shopping cart is empty')
         
     # 2. Resolve Shipping Address
-    address_id = data.get('shipping_address_id')
-    address_data = data.get('shipping_address')
-    
     address = None
-    if address_id:
-        # User specified an existing address
-        address = Address.query.filter_by(id=address_id).first()
+    if data.shipping_address_id:
+        address = db.query(Address).filter_by(id=data.shipping_address_id).first()
         if not address or (user_id and address.user_id != user_id):
-            return jsonify({'message': 'Invalid shipping address ID'}), 400
-    elif address_data:
-        # Create a new address
-        full_name = address_data.get('full_name')
-        address_line1 = address_data.get('address_line1')
-        address_line2 = address_data.get('address_line2')
-        city = address_data.get('city')
-        state = address_data.get('state')
-        postal_code = address_data.get('postal_code')
-        country = address_data.get('country', 'USA')
-        phone = address_data.get('phone')
-        
-        if not all([full_name, address_line1, city, state, postal_code, phone]):
-            return jsonify({'message': 'Missing fields in shipping address'}), 400
-            
+            raise HTTPException(status_code=400, detail='Invalid shipping address ID')
+    elif data.shipping_address:
         address = Address(
             user_id=None,
-            session_id=session_id,
-            full_name=full_name,
-            address_line1=address_line1,
-            address_line2=address_line2,
-            city=city,
-            state=state,
-            postal_code=postal_code,
-            country=country,
-            phone=phone
+            session_id=data.session_id,
+            full_name=data.shipping_address.full_name,
+            address_line1=data.shipping_address.address_line1,
+            address_line2=data.shipping_address.address_line2,
+            city=data.shipping_address.city,
+            state=data.shipping_address.state,
+            postal_code=data.shipping_address.postal_code,
+            country=data.shipping_address.country,
+            phone=data.shipping_address.phone
         )
-        db.session.add(address)
-        db.session.flush() # Flush to get address.id
+        db.add(address)
+        db.flush() # Flush to get address.id
     else:
-        return jsonify({'message': 'Shipping address details are required'}), 400
+        raise HTTPException(status_code=400, detail='Shipping address details are required')
         
     # 3. Create Order, Order Items and verify stock
     total_amount = 0.0
@@ -93,12 +98,14 @@ def place_order():
             continue
             
         if prod.stock_count < item.quantity:
-            return jsonify({'message': f'Insufficient stock for product: {prod.name}. Available: {prod.stock_count}'}), 400
+            raise HTTPException(
+                status_code=400,
+                detail=f'Insufficient stock for product: {prod.name}. Available: {prod.stock_count}'
+            )
             
         price = prod.discount_price if prod.discount_price else prod.price
         total_amount += price * item.quantity
         
-        # Decrement stock and update status
         prod.stock_count -= item.quantity
         if prod.stock_count == 0:
             prod.availability_status = 'out_of_stock'
@@ -118,33 +125,32 @@ def place_order():
     
     order = Order(
         user_id=user_id,
-        session_id=None if user_id else session_id,
+        session_id=None if user_id else data.session_id,
         status='processing',
         total_amount=round(total_amount, 2),
         shipping_address_id=address.id,
         tracking_number=tracking_number
     )
-    db.session.add(order)
-    db.session.flush() # Flush to get order.id
+    db.add(order)
+    db.flush()
     
-    # Save order items with their corresponding order_id
     for item in order_items:
         item.order_id = order.id
-        db.session.add(item)
+        db.add(item)
         
     # 4. Generate Mock Payment
-    transaction_id = f"TXN-{str(uuid.uuid4())[:12].upper()}" if 'uuid' in globals() else f"TXN-MOCK-{random.randint(100000, 999999)}"
+    transaction_id = f"TXN-{str(uuid.uuid4())[:12].upper()}"
     payment = Payment(
         order_id=order.id,
-        payment_method=payment_method,
+        payment_method=data.payment_method,
         transaction_id=transaction_id,
         status='completed',
         amount=round(total_amount, 2)
     )
-    db.session.add(payment)
+    db.add(payment)
     
     # 5. Empty Cart
-    CartItem.query.filter_by(cart_id=cart.id).delete()
+    db.query(CartItem).filter_by(cart_id=cart.id).delete()
     
     # 6. Generate Notifications
     if user_id:
@@ -152,95 +158,84 @@ def place_order():
             user_id=user_id,
             message=f"Order placed successfully! Your tracking number is {tracking_number}."
         )
-        db.session.add(notification)
+        db.add(notification)
         
-    # Notify product sellers
     unique_sellers = set(item.seller_id for item in order_items)
-    for seller_id in unique_sellers:
+    for s_id in unique_sellers:
         seller_notif = Notification(
-            user_id=seller_id,
+            user_id=s_id,
             message=f"New order received: {tracking_number} contains your products."
         )
-        db.session.add(seller_notif)
+        db.add(seller_notif)
         
-    db.session.commit()
+    db.commit()
     
-    return jsonify({
+    return {
         'message': 'Order placed successfully',
         'order_id': order.id,
         'tracking_number': tracking_number,
         'total_amount': order.total_amount
-    }), 201
+    }
 
-@orders_bp.route('', methods=['GET'])
-@jwt_required
-def get_orders():
-    # Roles filtering
-    if g.current_user_role == 'admin':
-        orders = Order.query.order_by(Order.created_at.desc()).all()
-        return jsonify([o.to_dict() for o in orders]), 200
+@router.get("")
+def get_orders(user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    if user.role == 'admin':
+        orders = db.query(Order).order_by(Order.created_at.desc()).all()
+        return [o.to_dict() for o in orders]
         
-    elif g.current_user_role == 'seller':
-        # Seller only views orders containing their products
-        # Get order items belonging to this seller
-        items = OrderItem.query.filter_by(seller_id=g.current_user_id).all()
+    elif user.role == 'seller':
+        items = db.query(OrderItem).filter_by(seller_id=user.id).all()
         order_ids = set(item.order_id for item in items)
-        orders = Order.query.filter(Order.id.in_(order_ids)).order_by(Order.created_at.desc()).all()
+        orders = db.query(Order).filter(Order.id.in_(order_ids)).order_by(Order.created_at.desc()).all()
         
-        # Modify to only show order details and specific products that belong to this seller
         seller_orders_list = []
         for order in orders:
             dict_rep = order.to_dict()
-            # filter items in dict representation
-            dict_rep['items'] = [it for it in dict_rep['items'] if it['seller_id'] == g.current_user_id]
+            dict_rep['items'] = [it for it in dict_rep['items'] if it['seller_id'] == user.id]
             seller_orders_list.append(dict_rep)
             
-        return jsonify(seller_orders_list), 200
+        return seller_orders_list
         
-    elif g.current_user_role == 'customer':
-        orders = Order.query.filter_by(user_id=g.current_user_id).order_by(Order.created_at.desc()).all()
-        return jsonify([o.to_dict() for o in orders]), 200
+    elif user.role == 'customer':
+        orders = db.query(Order).filter_by(user_id=user.id).order_by(Order.created_at.desc()).all()
+        return [o.to_dict() for o in orders]
         
-    return jsonify({'message': 'Access forbidden'}), 403
+    raise HTTPException(status_code=403, detail='Access forbidden')
 
-@orders_bp.route('/track/<string:tracking_number>', methods=['GET'])
-def track_order(tracking_number):
-    order = Order.query.filter_by(tracking_number=tracking_number).first()
+@router.get("/track/{tracking_number}")
+def track_order(tracking_number: str, db: Session = Depends(get_db)):
+    order = db.query(Order).filter_by(tracking_number=tracking_number).first()
     if not order:
-        return jsonify({'message': 'Order not found with the provided tracking number'}), 404
-        
-    return jsonify(order.to_dict()), 200
+        raise HTTPException(status_code=404, detail='Order not found with the provided tracking number')
+    return order.to_dict()
 
-# Update order status (Seller/Admin only)
-@orders_bp.route('/<int:order_id>/status', methods=['PUT'])
-@jwt_required
-@role_required(['seller', 'admin'])
-def update_order_status(order_id):
-    order = Order.query.get(order_id)
+@router.put("/{order_id}/status")
+def update_order_status(
+    order_id: int,
+    data: UpdateOrderStatusSchema,
+    db: Session = Depends(get_db),
+    user: User = Depends(check_role(['seller', 'admin']))
+):
+    order = db.query(Order).get(order_id)
     if not order:
-        return jsonify({'message': 'Order not found'}), 404
+        raise HTTPException(status_code=404, detail='Order not found')
         
-    data = request.get_json() or {}
-    new_status = data.get('status')
-    
-    if new_status not in ['pending', 'processing', 'shipped', 'delivered', 'cancelled']:
-        return jsonify({'message': 'Invalid status'}), 400
+    if data.status not in ['pending', 'processing', 'shipped', 'delivered', 'cancelled']:
+        raise HTTPException(status_code=400, detail='Invalid status')
         
-    # Check if seller is allowed to modify (must own at least one item in the order)
-    if g.current_user_role == 'seller':
-        owns_item = OrderItem.query.filter_by(order_id=order.id, seller_id=g.current_user_id).first()
+    if user.role == 'seller':
+        owns_item = db.query(OrderItem).filter_by(order_id=order.id, seller_id=user.id).first()
         if not owns_item:
-            return jsonify({'message': 'Access forbidden: You do not own any products in this order'}), 403
+            raise HTTPException(status_code=403, detail='Access forbidden: You do not own any products in this order')
             
-    order.status = new_status
+    order.status = data.status
     
-    # Notify customer
     if order.user_id:
         notif = Notification(
             user_id=order.user_id,
-            message=f"Order {order.tracking_number} status has been updated to '{new_status}'."
+            message=f"Order {order.tracking_number} status has been updated to '{data.status}'."
         )
-        db.session.add(notif)
+        db.add(notif)
         
-    db.session.commit()
-    return jsonify({'message': 'Order status updated successfully', 'status': order.status}), 200
+    db.commit()
+    return {'message': 'Order status updated successfully', 'status': order.status}

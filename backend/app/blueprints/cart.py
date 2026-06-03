@@ -1,15 +1,28 @@
-from flask import Blueprint, request, jsonify, g
-from ..models import Cart, CartItem, Product
-from ..database import db
+from fastapi import APIRouter, Depends, HTTPException, status, Header
+from sqlalchemy.orm import Session
+from ..models import User, Cart, CartItem, Product
+from ..database import get_db
 from ..auth import decode_token
+from pydantic import BaseModel
+from typing import Optional
 
-cart_bp = Blueprint('cart', __name__)
+router = APIRouter()
 
-def get_user_from_token():
-    auth_header = request.headers.get('Authorization')
-    if auth_header:
+class AddToCartSchema(BaseModel):
+    session_id: Optional[str] = None
+    product_id: int
+    quantity: Optional[int] = 1
+
+class UpdateCartItemSchema(BaseModel):
+    quantity: int
+
+class MergeCartSchema(BaseModel):
+    session_id: str
+
+def get_optional_user_id(authorization: Optional[str] = Header(None)):
+    if authorization:
         try:
-            token = auth_header.split(" ")[1]
+            token = authorization.split(" ")[1]
             payload = decode_token(token)
             if 'error' not in payload:
                 return payload['sub']
@@ -17,52 +30,57 @@ def get_user_from_token():
             pass
     return None
 
-def get_or_create_cart(user_id, session_id):
+def get_or_create_cart(user_id: Optional[int], session_id: Optional[str], db: Session):
     if user_id:
-        cart = Cart.query.filter_by(user_id=user_id).first()
+        cart = db.query(Cart).filter_by(user_id=user_id).first()
         if not cart:
             cart = Cart(user_id=user_id)
-            db.session.add(cart)
-            db.session.commit()
+            db.add(cart)
+            db.commit()
+            db.refresh(cart)
         return cart
     elif session_id:
-        cart = Cart.query.filter_by(session_id=session_id).first()
+        cart = db.query(Cart).filter_by(session_id=session_id).first()
         if not cart:
             cart = Cart(session_id=session_id)
-            db.session.add(cart)
-            db.session.commit()
+            db.add(cart)
+            db.commit()
+            db.refresh(cart)
         return cart
     return None
 
-@cart_bp.route('', methods=['GET'])
-def get_cart():
-    user_id = get_user_from_token()
-    session_id = request.args.get('session_id')
-    
+@router.get("")
+def get_cart(
+    session_id: Optional[str] = None,
+    user_id: Optional[int] = Depends(get_optional_user_id),
+    db: Session = Depends(get_db)
+):
     if not user_id and not session_id:
-        return jsonify({'message': 'Either user token or guest session_id is required'}), 400
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail='Either user token or guest session_id is required'
+        )
         
-    cart = get_or_create_cart(user_id, session_id)
+    cart = get_or_create_cart(user_id, session_id, db)
     if not cart:
-        return jsonify({'items': [], 'total_price': 0.0}), 200
+        return {'items': [], 'total_price': 0.0}
         
     # Auto merge guest cart if both user_id and session_id are provided
     if user_id and session_id:
-        guest_cart = Cart.query.filter_by(session_id=session_id).first()
+        guest_cart = db.query(Cart).filter_by(session_id=session_id).first()
         if guest_cart and guest_cart.id != cart.id:
             for item in guest_cart.items:
-                existing_item = CartItem.query.filter_by(cart_id=cart.id, product_id=item.product_id).first()
+                existing_item = db.query(CartItem).filter_by(cart_id=cart.id, product_id=item.product_id).first()
                 if existing_item:
                     existing_item.quantity += item.quantity
                 else:
                     new_item = CartItem(cart_id=cart.id, product_id=item.product_id, quantity=item.quantity)
-                    db.session.add(new_item)
-            db.session.delete(guest_cart)
-            db.session.commit()
-            # Refresh cart query
-            cart = Cart.query.filter_by(user_id=user_id).first()
+                    db.add(new_item)
+            db.delete(guest_cart)
+            db.commit()
+            db.refresh(cart)
             
-    items = CartItem.query.filter_by(cart_id=cart.id).all()
+    items = db.query(CartItem).filter_by(cart_id=cart.id).all()
     
     # Calculate cart total
     total = 0.0
@@ -74,134 +92,146 @@ def get_cart():
             total += price * item.quantity
             serialized_items.append(item.to_dict())
             
-    return jsonify({
+    return {
         'cart_id': cart.id,
         'items': serialized_items,
         'total_price': round(total, 2)
-    }), 200
+    }
 
-@cart_bp.route('', methods=['POST'])
-def add_to_cart():
-    user_id = get_user_from_token()
-    data = request.get_json() or {}
-    session_id = data.get('session_id')
-    product_id = data.get('product_id')
-    quantity = data.get('quantity', 1)
-    
-    if product_id is not None:
-        try:
-            product_id = int(product_id)
-        except (ValueError, TypeError):
-            return jsonify({'message': 'Invalid product ID'}), 400
-            
-    if quantity is not None:
-        try:
-            quantity = int(quantity)
-        except (ValueError, TypeError):
-            quantity = 1
-            
-    if not product_id:
-        return jsonify({'message': 'Product ID is required'}), 400
-        
-    product = Product.query.get(product_id)
+@router.post("")
+def add_to_cart(
+    data: AddToCartSchema,
+    user_id: Optional[int] = Depends(get_optional_user_id),
+    db: Session = Depends(get_db)
+):
+    product = db.query(Product).filter_by(id=data.product_id).first()
     if not product:
-        return jsonify({'message': 'Product not found'}), 404
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail='Product not found'
+        )
         
     if product.stock_count <= 0:
-        return jsonify({'message': 'Product is out of stock'}), 400
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail='Product is out of stock'
+        )
         
-    if not user_id and not session_id:
-        return jsonify({'message': 'Authentication or guest session_id required'}), 400
+    if not user_id and not data.session_id:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail='Authentication or guest session_id required'
+        )
         
-    cart = get_or_create_cart(user_id, session_id)
+    cart = get_or_create_cart(user_id, data.session_id, db)
     
     # Check if item already exists in cart
-    cart_item = CartItem.query.filter_by(cart_id=cart.id, product_id=product_id).first()
+    cart_item = db.query(CartItem).filter_by(cart_id=cart.id, product_id=data.product_id).first()
     if cart_item:
-        new_qty = cart_item.quantity + quantity
+        new_qty = cart_item.quantity + data.quantity
         if new_qty > product.stock_count:
             cart_item.quantity = product.stock_count
         else:
             cart_item.quantity = new_qty
     else:
-        if quantity > product.stock_count:
-            quantity = product.stock_count
-        cart_item = CartItem(cart_id=cart.id, product_id=product_id, quantity=quantity)
-        db.session.add(cart_item)
+        qty = data.quantity
+        if qty > product.stock_count:
+            qty = product.stock_count
+        cart_item = CartItem(cart_id=cart.id, product_id=data.product_id, quantity=qty)
+        db.add(cart_item)
         
-    db.session.commit()
-    return jsonify({'message': 'Item added to cart', 'item': cart_item.to_dict()}), 200
+    db.commit()
+    db.refresh(cart_item)
+    return {'message': 'Item added to cart', 'item': cart_item.to_dict()}
 
-@cart_bp.route('/<int:item_id>', methods=['PUT'])
-def update_cart_item(item_id):
-    data = request.get_json() or {}
-    quantity = data.get('quantity')
-    
-    if quantity is not None:
-        try:
-            quantity = int(quantity)
-        except (ValueError, TypeError):
-            return jsonify({'message': 'Quantity must be a positive integer'}), 400
-            
-    if quantity is None or quantity <= 0:
-        return jsonify({'message': 'Quantity must be a positive integer'}), 400
+@router.put("/{item_id}")
+def update_cart_item(
+    item_id: int,
+    data: UpdateCartItemSchema,
+    session_id: Optional[str] = None,
+    user_id: Optional[int] = Depends(get_optional_user_id),
+    db: Session = Depends(get_db)
+):
+    if data.quantity <= 0:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail='Quantity must be a positive integer'
+        )
         
-    user_id = get_user_from_token()
-    session_id = request.args.get('session_id')
-    
     if not user_id and not session_id:
-        return jsonify({'message': 'Authentication or session_id required'}), 401
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail='Authentication or session_id required'
+        )
         
-    cart = get_or_create_cart(user_id, session_id)
-    cart_item = CartItem.query.filter_by(id=item_id, cart_id=cart.id).first()
+    cart = get_or_create_cart(user_id, session_id, db)
+    cart_item = db.query(CartItem).filter_by(id=item_id, cart_id=cart.id).first()
     
     if not cart_item:
-        return jsonify({'message': 'Cart item not found'}), 404
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail='Cart item not found'
+        )
         
-    product = Product.query.get(cart_item.product_id)
-    if quantity > product.stock_count:
-        return jsonify({'message': f'Cannot exceed available stock of {product.stock_count}'}), 400
+    product = db.query(Product).filter_by(id=cart_item.product_id).first()
+    if data.quantity > product.stock_count:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f'Cannot exceed available stock of {product.stock_count}'
+        )
         
-    cart_item.quantity = quantity
-    db.session.commit()
+    cart_item.quantity = data.quantity
+    db.commit()
+    db.refresh(cart_item)
     
-    return jsonify({'message': 'Cart item updated', 'item': cart_item.to_dict()}), 200
+    return {'message': 'Cart item updated', 'item': cart_item.to_dict()}
 
-@cart_bp.route('/<int:item_id>', methods=['DELETE'])
-def remove_from_cart(item_id):
-    user_id = get_user_from_token()
-    session_id = request.args.get('session_id')
-    
+@router.delete("/{item_id}")
+def remove_from_cart(
+    item_id: int,
+    session_id: Optional[str] = None,
+    user_id: Optional[int] = Depends(get_optional_user_id),
+    db: Session = Depends(get_db)
+):
     if not user_id and not session_id:
-        return jsonify({'message': 'Authentication or session_id required'}), 401
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail='Authentication or session_id required'
+        )
         
-    cart = get_or_create_cart(user_id, session_id)
-    cart_item = CartItem.query.filter_by(id=item_id, cart_id=cart.id).first()
+    cart = get_or_create_cart(user_id, session_id, db)
+    cart_item = db.query(CartItem).filter_by(id=item_id, cart_id=cart.id).first()
     
     if not cart_item:
-        return jsonify({'message': 'Cart item not found'}), 404
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail='Cart item not found'
+        )
         
-    db.session.delete(cart_item)
-    db.session.commit()
+    db.delete(cart_item)
+    db.commit()
     
-    return jsonify({'message': 'Item removed from cart'}), 200
+    return {'message': 'Item removed from cart'}
 
-@cart_bp.route('/merge', methods=['POST'])
-def merge_cart():
-    user_id = get_user_from_token()
-    data = request.get_json() or {}
-    session_id = data.get('session_id')
-    
-    if not user_id or not session_id:
-        return jsonify({'message': 'Both authorization token and session_id are required for merging'}), 400
+@router.post("/merge")
+def merge_cart(
+    data: MergeCartSchema,
+    user_id: Optional[int] = Depends(get_optional_user_id),
+    db: Session = Depends(get_db)
+):
+    if not user_id or not data.session_id:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail='Both authorization token and session_id are required for merging'
+        )
         
-    user_cart = get_or_create_cart(user_id, None)
-    guest_cart = Cart.query.filter_by(session_id=session_id).first()
+    user_cart = get_or_create_cart(user_id, None, db)
+    guest_cart = db.query(Cart).filter_by(session_id=data.session_id).first()
     
     if guest_cart:
         for item in guest_cart.items:
-            existing_item = CartItem.query.filter_by(cart_id=user_cart.id, product_id=item.product_id).first()
-            prod = Product.query.get(item.product_id)
+            existing_item = db.query(CartItem).filter_by(cart_id=user_cart.id, product_id=item.product_id).first()
+            prod = db.query(Product).filter_by(id=item.product_id).first()
             if not prod:
                 continue
                 
@@ -211,9 +241,9 @@ def merge_cart():
             else:
                 new_qty = min(item.quantity, prod.stock_count)
                 new_item = CartItem(cart_id=user_cart.id, product_id=item.product_id, quantity=new_qty)
-                db.session.add(new_item)
+                db.add(new_item)
                 
-        db.session.delete(guest_cart)
-        db.session.commit()
+        db.delete(guest_cart)
+        db.commit()
         
-    return jsonify({'message': 'Carts merged successfully'}), 200
+    return {'message': 'Carts merged successfully'}

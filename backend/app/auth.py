@@ -1,12 +1,16 @@
 import os
 import datetime
-from functools import wraps
 import jwt
-from flask import request, jsonify, g
+from fastapi import Depends, HTTPException, status
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+from sqlalchemy.orm import Session
 from .models import User
+from .database import get_db
 
 # Load secret key from environment or fallback
 JWT_SECRET = os.environ.get('JWT_SECRET', 'shop_and_chil_super_secret_key_123!')
+
+security = HTTPBearer(auto_error=False)
 
 def generate_token(user_id, role):
     payload = {
@@ -26,50 +30,50 @@ def decode_token(token):
     except jwt.InvalidTokenError:
         return {'error': 'Invalid token'}
 
-def jwt_required(f):
-    @wraps(f)
-    def decorated(*args, **kwargs):
-        token = None
-        auth_header = request.headers.get('Authorization')
-        
-        if auth_header:
-            try:
-                # Bearer <token>
-                token = auth_header.split(" ")[1]
-            except IndexError:
-                return jsonify({'message': 'Bearer token format invalid'}), 401
-                
-        if not token:
-            return jsonify({'message': 'Authorization token is missing'}), 401
-            
-        payload = decode_token(token)
-        if 'error' in payload:
-            return jsonify({'message': payload['error']}), 401
-            
-        g.current_user_id = payload['sub']
-        g.current_user_role = payload['role']
-        g.current_user = User.query.get(g.current_user_id)
-        
-        if not g.current_user:
-            return jsonify({'message': 'User associated with this token not found'}), 401
-            
-        if g.current_user.status == 'blocked':
-            return jsonify({'message': 'Your account has been blocked by the admin'}), 403
-            
-        return f(*args, **kwargs)
-    return decorated
+def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(security), db: Session = Depends(get_db)):
+    if not credentials:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Authorization token is missing"
+        )
+    token = credentials.credentials
+    payload = decode_token(token)
+    if 'error' in payload:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail=payload['error']
+        )
+    user_id = payload['sub']
+    user = db.query(User).filter(User.id == user_id).first()
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="User associated with this token not found"
+        )
+    if user.status == 'blocked':
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Your account has been blocked by the admin"
+        )
+    return user
 
-def role_required(allowed_roles):
-    def decorator(f):
-        @wraps(f)
-        def decorated(*args, **kwargs):
-            # Ensure jwt_required ran first (g.current_user_role must be set)
-            if not hasattr(g, 'current_user_role'):
-                return jsonify({'message': 'Authentication required before checking roles'}), 401
-                
-            if g.current_user_role not in allowed_roles:
-                return jsonify({'message': 'Access forbidden: Insufficient permissions'}), 403
-                
-            return f(*args, **kwargs)
-        return decorated
-    return decorator
+def check_role(allowed_roles: list):
+    def dependency(user: User = Depends(get_current_user)):
+        if user.role not in allowed_roles:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Access forbidden: Insufficient permissions"
+            )
+        return user
+    return dependency
+
+def get_optional_user_id(credentials: HTTPAuthorizationCredentials = Depends(security)):
+    if credentials:
+        try:
+            token = credentials.credentials
+            payload = decode_token(token)
+            if 'error' not in payload:
+                return payload['sub']
+        except Exception:
+            pass
+    return None

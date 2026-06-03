@@ -19,8 +19,6 @@ services:
     ports:
       - "5001:5001"
     environment:
-      - FLASK_APP=app
-      - FLASK_ENV=development
       - DATABASE_URL=postgresql://postgres:postgres@db:5432/shopandchil
       - JWT_SECRET=shop_and_chil_super_secret_key_123!
       - UPLOAD_FOLDER=/app/app/uploads

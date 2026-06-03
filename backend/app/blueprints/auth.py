@@ -1,204 +1,228 @@
-from flask import Blueprint, request, jsonify, g
+from fastapi import APIRouter, Depends, HTTPException, status
+from sqlalchemy.orm import Session
 from ..models import User, Address
-from ..database import db
-from ..auth import generate_token, jwt_required
+from ..database import get_db
+from ..auth import generate_token, get_current_user, check_role
+from pydantic import BaseModel, Field, EmailStr
+from typing import Optional, List
 
-auth_bp = Blueprint('auth', __name__)
+router = APIRouter()
 
-@auth_bp.route('/register', methods=['POST'])
-def register():
-    data = request.get_json() or {}
-    
-    email = data.get('email')
-    password = data.get('password')
-    name = data.get('name')
-    role = data.get('role', 'customer') # 'customer' or 'seller'
-    
-    if not email or not password or not name:
-        return jsonify({'message': 'Email, password, and name are required'}), 400
+class UserRegisterSchema(BaseModel):
+    email: EmailStr
+    password: str
+    name: str
+    role: Optional[str] = 'customer'
+
+class UserLoginSchema(BaseModel):
+    email: EmailStr
+    password: str
+
+class UserUpdateSchema(BaseModel):
+    name: Optional[str] = None
+    email: Optional[EmailStr] = None
+    password: Optional[str] = None
+
+class AddressCreateSchema(BaseModel):
+    full_name: str
+    address_line1: str
+    address_line2: Optional[str] = None
+    city: str
+    state: str
+    postal_code: str
+    country: Optional[str] = 'USA'
+    phone: str
+    is_default: Optional[bool] = False
+
+class AddressUpdateSchema(BaseModel):
+    full_name: Optional[str] = None
+    address_line1: Optional[str] = None
+    address_line2: Optional[str] = None
+    city: Optional[str] = None
+    state: Optional[str] = None
+    postal_code: Optional[str] = None
+    country: Optional[str] = None
+    phone: Optional[str] = None
+    is_default: Optional[bool] = None
+
+@router.post("/register", status_code=status.HTTP_201_CREATED)
+def register(data: UserRegisterSchema, db: Session = Depends(get_db)):
+    if data.role not in ['customer', 'seller']:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail='Invalid role. Must be customer or seller'
+        )
         
-    if role not in ['customer', 'seller']:
-        return jsonify({'message': 'Invalid role. Must be customer or seller'}), 400
+    if db.query(User).filter_by(email=data.email).first():
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail='A user with this email already exists'
+        )
         
-    # Check if user already exists
-    if User.query.filter_by(email=email).first():
-        return jsonify({'message': 'A user with this email already exists'}), 409
-        
-    user = User(email=email, name=name, role=role)
-    user.set_password(password)
+    user = User(email=data.email, name=data.name, role=data.role)
+    user.set_password(data.password)
     
-    # If seller registers, their account must be approved by admin
-    if role == 'seller':
+    if data.role == 'seller':
         user.status = 'pending'
     else:
         user.status = 'approved'
         
-    db.session.add(user)
-    db.session.commit()
+    db.add(user)
+    db.commit()
+    db.refresh(user)
     
-    return jsonify({
+    return {
         'message': 'Registration successful',
         'user': user.to_dict()
-    }), 201
+    }
 
-@auth_bp.route('/login', methods=['POST'])
-def login():
-    data = request.get_json() or {}
+@router.post("/login")
+def login(data: UserLoginSchema, db: Session = Depends(get_db)):
+    user = db.query(User).filter_by(email=data.email).first()
     
-    email = data.get('email')
-    password = data.get('password')
-    
-    if not email or not password:
-        return jsonify({'message': 'Email and password are required'}), 400
-        
-    user = User.query.filter_by(email=email).first()
-    
-    if not user or not user.check_password(password):
-        return jsonify({'message': 'Invalid email or password'}), 401
+    if not user or not user.check_password(data.password):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail='Invalid email or password'
+        )
         
     if user.status == 'pending':
-        return jsonify({'message': 'Your account is pending approval by the admin'}), 403
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail='Your account is pending approval by the admin'
+        )
     elif user.status == 'blocked':
-        return jsonify({'message': 'Your account has been blocked by the admin'}), 403
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail='Your account has been blocked by the admin'
+        )
         
     token = generate_token(user.id, user.role)
     
-    return jsonify({
+    return {
         'token': token,
         'user': user.to_dict()
-    }), 200
+    }
 
-@auth_bp.route('/me', methods=['GET'])
-@jwt_required
-def get_profile():
-    addresses = Address.query.filter_by(user_id=g.current_user_id).all()
-    user_data = g.current_user.to_dict()
+@router.get("/me")
+def get_profile(user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    # Addresses relationship is lazy loaded, let's load it
+    addresses = db.query(Address).filter_by(user_id=user.id).all()
+    user_data = user.to_dict()
     user_data['addresses'] = [addr.to_dict() for addr in addresses]
-    return jsonify(user_data), 200
+    return user_data
 
-@auth_bp.route('/me', methods=['PUT'])
-@jwt_required
-def update_profile():
-    data = request.get_json() or {}
-    
-    name = data.get('name')
-    email = data.get('email')
-    password = data.get('password')
-    
-    if name:
-        g.current_user.name = name
-    if email:
-        # Check if email is already taken by someone else
-        existing_user = User.query.filter_by(email=email).first()
-        if existing_user and existing_user.id != g.current_user_id:
-            return jsonify({'message': 'Email already in use'}), 409
-        g.current_user.email = email
-    if password:
-        g.current_user.set_password(password)
+@router.put("/me")
+def update_profile(data: UserUpdateSchema, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    if data.name:
+        user.name = data.name
+    if data.email:
+        existing_user = db.query(User).filter_by(email=data.email).first()
+        if existing_user and existing_user.id != user.id:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail='Email already in use'
+            )
+        user.email = data.email
+    if data.password:
+        user.set_password(data.password)
         
-    db.session.commit()
-    return jsonify({
+    db.commit()
+    db.refresh(user)
+    return {
         'message': 'Profile updated successfully',
-        'user': g.current_user.to_dict()
-    }), 200
+        'user': user.to_dict()
+    }
 
-@auth_bp.route('/addresses', methods=['GET'])
-@jwt_required
-def get_addresses():
-    addresses = Address.query.filter_by(user_id=g.current_user_id).order_by(Address.is_default.desc()).all()
-    return jsonify([addr.to_dict() for addr in addresses]), 200
+@router.get("/addresses")
+def get_addresses(user: User = Depends(check_role(['customer', 'admin'])), db: Session = Depends(get_db)):
+    addresses = db.query(Address).filter_by(user_id=user.id).order_by(Address.is_default.desc()).all()
+    return [addr.to_dict() for addr in addresses]
 
-@auth_bp.route('/addresses', methods=['POST'])
-@jwt_required
-def add_address():
-    data = request.get_json() or {}
-    
-    full_name = data.get('full_name')
-    address_line1 = data.get('address_line1')
-    address_line2 = data.get('address_line2')
-    city = data.get('city')
-    state = data.get('state')
-    postal_code = data.get('postal_code')
-    country = data.get('country', 'USA')
-    phone = data.get('phone')
-    is_default = data.get('is_default', False)
-    
-    if not all([full_name, address_line1, city, state, postal_code, phone]):
-        return jsonify({'message': 'Missing required address fields'}), 400
-        
+@router.post("/addresses", status_code=status.HTTP_201_CREATED)
+def add_address(data: AddressCreateSchema, user: User = Depends(check_role(['customer'])), db: Session = Depends(get_db)):
     # If set as default, remove default status from all other addresses of this user
-    if is_default:
-        Address.query.filter_by(user_id=g.current_user_id).update({Address.is_default: False})
+    if data.is_default:
+        db.query(Address).filter_by(user_id=user.id).update({Address.is_default: False})
         
     # If this is the user's first address, make it default anyway
-    first_addr = Address.query.filter_by(user_id=g.current_user_id).first()
+    first_addr = db.query(Address).filter_by(user_id=user.id).first()
+    is_default = data.is_default
     if not first_addr:
         is_default = True
         
     address = Address(
-        user_id=g.current_user_id,
-        full_name=full_name,
-        address_line1=address_line1,
-        address_line2=address_line2,
-        city=city,
-        state=state,
-        postal_code=postal_code,
-        country=country,
-        phone=phone,
+        user_id=user.id,
+        full_name=data.full_name,
+        address_line1=data.address_line1,
+        address_line2=data.address_line2,
+        city=data.city,
+        state=data.state,
+        postal_code=data.postal_code,
+        country=data.country,
+        phone=data.phone,
         is_default=is_default
     )
     
-    db.session.add(address)
-    db.session.commit()
+    db.add(address)
+    db.commit()
+    db.refresh(address)
     
-    return jsonify({
+    return {
         'message': 'Address added successfully',
         'address': address.to_dict()
-    }), 201
+    }
 
-@auth_bp.route('/addresses/<int:address_id>', methods=['PUT'])
-@jwt_required
-def update_address(address_id):
-    address = Address.query.filter_by(id=address_id, user_id=g.current_user_id).first()
+@router.put("/addresses/{address_id}")
+def update_address(address_id: int, data: AddressUpdateSchema, user: User = Depends(check_role(['customer'])), db: Session = Depends(get_db)):
+    address = db.query(Address).filter_by(id=address_id, user_id=user.id).first()
     if not address:
-        return jsonify({'message': 'Address not found'}), 404
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail='Address not found'
+        )
         
-    data = request.get_json() or {}
+    if data.full_name is not None: address.full_name = data.full_name
+    if data.address_line1 is not None: address.address_line1 = data.address_line1
+    if data.address_line2 is not None: address.address_line2 = data.address_line2
+    if data.city is not None: address.city = data.city
+    if data.state is not None: address.state = data.state
+    if data.postal_code is not None: address.postal_code = data.postal_code
+    if data.country is not None: address.country = data.country
+    if data.phone is not None: address.phone = data.phone
     
-    address.full_name = data.get('full_name', address.full_name)
-    address.address_line1 = data.get('address_line1', address.address_line1)
-    address.address_line2 = data.get('address_line2', address.address_line2)
-    address.city = data.get('city', address.city)
-    address.state = data.get('state', address.state)
-    address.postal_code = data.get('postal_code', address.postal_code)
-    address.country = data.get('country', address.country)
-    address.phone = data.get('phone', address.phone)
-    
-    is_default = data.get('is_default', address.is_default)
-    if is_default and not address.is_default:
-        Address.query.filter_by(user_id=g.current_user_id).update({Address.is_default: False})
-        address.is_default = True
-        
-    db.session.commit()
-    return jsonify({
+    if data.is_default is not None:
+        if data.is_default and not address.is_default:
+            db.query(Address).filter_by(user_id=user.id).update({Address.is_default: False})
+            address.is_default = True
+        elif not data.is_default:
+            address.is_default = False
+            
+    db.commit()
+    db.refresh(address)
+    return {
         'message': 'Address updated successfully',
         'address': address.to_dict()
-    }), 200
+    }
 
-@auth_bp.route('/addresses/<int:address_id>', methods=['DELETE'])
-@jwt_required
-def delete_address(address_id):
-    address = Address.query.filter_by(id=address_id, user_id=g.current_user_id).first()
+@router.delete("/addresses/{address_id}")
+def delete_address(address_id: int, user: User = Depends(check_role(['customer'])), db: Session = Depends(get_db)):
+    address = db.query(Address).filter_by(id=address_id, user_id=user.id).first()
     if not address:
-        return jsonify({'message': 'Address not found'}), 404
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail='Address not found'
+        )
         
-    db.session.delete(address)
+    db.delete(address)
     
     # If the deleted address was default, make another one default if possible
     if address.is_default:
-        next_addr = Address.query.filter_by(user_id=g.current_user_id).first()
+        next_addr = db.query(Address).filter_by(user_id=user.id).first()
         if next_addr:
             next_addr.is_default = True
             
-    db.session.commit()
-    return jsonify({'message': 'Address deleted successfully'}), 200
+    db.commit()
+    return {
+        'message': 'Address deleted successfully'
+    }

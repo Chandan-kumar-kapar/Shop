@@ -15,4 +15,4 @@ COPY . .
 
 EXPOSE 5001
 
-CMD ["sh", "-c", "python seed.py && python -m flask run --host=0.0.0.0 --port=5001 --reload"]
+CMD ["sh", "-c", "python seed.py && uvicorn app.main:app --host 0.0.0.0 --port 5001 --reload"]

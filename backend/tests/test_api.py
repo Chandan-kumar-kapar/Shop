@@ -1,41 +1,57 @@
 import pytest
-import tempfile
 import os
-import json
-from app import create_app
-from app.database import db
-from app.models import User, Category, Product, ProductImage
+from fastapi.testclient import TestClient
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker
+from app.main import app
+from app.database import Base, get_db
+from app.models import User, Category, Product, ProductImage, Review, Wishlist, BrowsingHistory, Cart, CartItem, Order, OrderItem, Address, Payment, Notification
 
-@pytest.fixture
-def client():
-    # Setup temporary database file path
-    db_fd, db_path = tempfile.mkstemp()
+# Setup SQLite test DB
+SQLALCHEMY_DATABASE_URL = "sqlite:////tmp/test.db"
+engine = create_engine(SQLALCHEMY_DATABASE_URL, connect_args={"check_same_thread": False})
+TestingSessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+
+@pytest.fixture(scope="function")
+def db_session():
+    Base.metadata.create_all(bind=engine)
+    db = TestingSessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
+        Base.metadata.drop_all(bind=engine)
+        engine.dispose()
+        if os.path.exists("/tmp/test.db"):
+            try:
+                os.remove("/tmp/test.db")
+            except Exception:
+                pass
+
+@pytest.fixture(scope="function")
+def client(db_session):
+    def override_get_db():
+        try:
+            yield db_session
+        finally:
+            pass
     
-    # Override environment variable so create_app uses the test DB from the start
-    os.environ['DATABASE_URL'] = f"sqlite:///{db_path}"
+    app.dependency_overrides[get_db] = override_get_db
     
-    app = create_app()
-    app.config['TESTING'] = True
+    # Seed default category for tests
+    cat = Category(name="Electronics", description="Electro devices")
+    db_session.add(cat)
+    db_session.commit()
     
-    with app.test_client() as client:
-        with app.app_context():
-            db.create_all()
-            # Seed a default category
-            cat = Category(name="Electronics", description="Electro devices")
-            db.session.add(cat)
-            db.session.commit()
-        yield client
-        
-    os.close(db_fd)
-    os.unlink(db_path)
-    # Clean up environment variable
-    if 'DATABASE_URL' in os.environ:
-        del os.environ['DATABASE_URL']
+    with TestClient(app) as test_client:
+        yield test_client
+    
+    app.dependency_overrides.clear()
 
 def test_health_check(client):
     response = client.get('/api/health')
     assert response.status_code == 200
-    data = json.loads(response.data)
+    data = response.json()
     assert data['status'] == 'healthy'
 
 def test_user_registration_and_login(client):
@@ -54,12 +70,12 @@ def test_user_registration_and_login(client):
         'password': 'password123'
     })
     assert response.status_code == 200
-    data = json.loads(response.data)
+    data = response.json()
     assert 'token' in data
     assert data['user']['role'] == 'customer'
 
 def test_get_products(client):
     response = client.get('/api/products')
     assert response.status_code == 200
-    data = json.loads(response.data)
+    data = response.json()
     assert isinstance(data, list)

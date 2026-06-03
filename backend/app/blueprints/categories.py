@@ -1,35 +1,40 @@
-from flask import Blueprint, request, jsonify, g
-from ..models import Category
-from ..database import db
-from ..auth import jwt_required, role_required
+from fastapi import APIRouter, Depends, HTTPException, status
+from sqlalchemy.orm import Session
+from ..models import Category, User
+from ..database import get_db
+from ..auth import get_current_user, check_role
+from pydantic import BaseModel, Field
 
-categories_bp = Blueprint('categories', __name__)
+router = APIRouter()
 
-@categories_bp.route('', methods=['GET'])
-def get_categories():
-    categories = Category.query.all()
-    return jsonify([cat.to_dict() for cat in categories]), 200
+class CategoryCreateSchema(BaseModel):
+    name: str = Field(..., min_length=1)
+    description: str = None
+    image_url: str = None
 
-@categories_bp.route('', methods=['POST'])
-@jwt_required
-@role_required(['admin'])
-def create_category():
-    data = request.get_json() or {}
-    name = data.get('name')
-    description = data.get('description')
-    image_url = data.get('image_url')
-    
-    if not name:
-        return jsonify({'message': 'Category name is required'}), 400
+@router.get("")
+def get_categories(db: Session = Depends(get_db)):
+    categories = db.query(Category).all()
+    return [cat.to_dict() for cat in categories]
+
+@router.post("", status_code=status.HTTP_201_CREATED)
+def create_category(
+    data: CategoryCreateSchema,
+    db: Session = Depends(get_db),
+    admin: User = Depends(check_role(['admin']))
+):
+    if db.query(Category).filter_by(name=data.name).first():
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail='Category with this name already exists'
+        )
         
-    if Category.query.filter_by(name=name).first():
-        return jsonify({'message': 'Category with this name already exists'}), 409
-        
-    cat = Category(name=name, description=description, image_url=image_url)
-    db.session.add(cat)
-    db.session.commit()
+    cat = Category(name=data.name, description=data.description, image_url=data.image_url)
+    db.add(cat)
+    db.commit()
+    db.refresh(cat)
     
-    return jsonify({
+    return {
         'message': 'Category created successfully',
         'category': cat.to_dict()
-    }), 201
+    }
