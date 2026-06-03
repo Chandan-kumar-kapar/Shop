@@ -1,0 +1,586 @@
+{
+  "openapi": "3.0.0",
+  "info": {
+    "title": "Shop&Chil API",
+    "version": "1.0.0",
+    "description": "API documentation for the Shop&Chil e-commerce application backend."
+  },
+  "servers": [
+    {
+      "url": "http://localhost:5001",
+      "description": "Local development server"
+    }
+  ],
+  "components": {
+    "securitySchemes": {
+      "BearerAuth": {
+        "type": "http",
+        "scheme": "bearer",
+        "bearerFormat": "JWT"
+      }
+    },
+    "schemas": {
+      "User": {
+        "type": "object",
+        "properties": {
+          "id": { "type": "integer" },
+          "email": { "type": "string" },
+          "name": { "type": "string" },
+          "role": { "type": "string", "enum": ["customer", "seller", "admin"] },
+          "status": { "type": "string", "enum": ["pending", "approved", "blocked"] }
+        }
+      },
+      "Address": {
+        "type": "object",
+        "properties": {
+          "id": { "type": "integer" },
+          "user_id": { "type": "integer", "nullable": true },
+          "full_name": { "type": "string" },
+          "address_line1": { "type": "string" },
+          "address_line2": { "type": "string", "nullable": true },
+          "city": { "type": "string" },
+          "state": { "type": "string" },
+          "postal_code": { "type": "string" },
+          "country": { "type": "string" },
+          "phone": { "type": "string" },
+          "is_default": { "type": "boolean" }
+        }
+      },
+      "Product": {
+        "type": "object",
+        "properties": {
+          "id": { "type": "integer" },
+          "name": { "type": "string" },
+          "title": { "type": "string" },
+          "description": { "type": "string" },
+          "price": { "type": "number" },
+          "discount_price": { "type": "number", "nullable": true },
+          "stock_count": { "type": "integer" },
+          "category_id": { "type": "integer" },
+          "category_name": { "type": "string", "nullable": true },
+          "brand": { "type": "string" },
+          "rating": { "type": "number" },
+          "seller_id": { "type": "integer" },
+          "seller_name": { "type": "string", "nullable": true },
+          "SKU": { "type": "string" },
+          "availability_status": { "type": "string" },
+          "images": {
+            "type": "array",
+            "items": { "type": "string" }
+          }
+        }
+      },
+      "CartItem": {
+        "type": "object",
+        "properties": {
+          "id": { "type": "integer" },
+          "cart_id": { "type": "integer" },
+          "product_id": { "type": "integer" },
+          "quantity": { "type": "integer" },
+          "product": { "$ref": "#/components/schemas/Product" }
+        }
+      },
+      "Cart": {
+        "type": "object",
+        "properties": {
+          "cart_id": { "type": "integer" },
+          "items": {
+            "type": "array",
+            "items": { "$ref": "#/components/schemas/CartItem" }
+          },
+          "total_price": { "type": "number" }
+        }
+      },
+      "Order": {
+        "type": "object",
+        "properties": {
+          "id": { "type": "integer" },
+          "user_id": { "type": "integer", "nullable": true },
+          "session_id": { "type": "string", "nullable": true },
+          "status": { "type": "string", "enum": ["pending", "processing", "shipped", "delivered", "cancelled"] },
+          "total_amount": { "type": "number" },
+          "shipping_address": { "$ref": "#/components/schemas/Address" },
+          "tracking_number": { "type": "string" },
+          "created_at": { "type": "string" },
+          "items": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "id": { "type": "integer" },
+                "product_id": { "type": "integer" },
+                "quantity": { "type": "integer" },
+                "price": { "type": "number" },
+                "discount_price": { "type": "number", "nullable": true },
+                "product": { "$ref": "#/components/schemas/Product" }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "paths": {
+    "/api/auth/register": {
+      "post": {
+        "summary": "Register a new user",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["email", "password", "name"],
+                "properties": {
+                  "email": { "type": "string", "format": "email" },
+                  "password": { "type": "string" },
+                  "name": { "type": "string" },
+                  "role": { "type": "string", "enum": ["customer", "seller"], "default": "customer" }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "User created successfully",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "message": { "type": "string" },
+                    "user": { "$ref": "#/components/schemas/User" }
+                  }
+                }
+              }
+            }
+          },
+          "400": { "description": "Missing parameters" },
+          "409": { "description": "Email already in use" }
+        }
+      }
+    },
+    "/api/auth/login": {
+      "post": {
+        "summary": "Log in and receive JWT token",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["email", "password"],
+                "properties": {
+                  "email": { "type": "string", "format": "email" },
+                  "password": { "type": "string" }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Login successful",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "token": { "type": "string" },
+                    "user": { "$ref": "#/components/schemas/User" }
+                  }
+                }
+              }
+            }
+          },
+          "401": { "description": "Invalid credentials" }
+        }
+      }
+    },
+    "/api/auth/me": {
+      "get": {
+        "summary": "Get current user profile details",
+        "security": [{ "BearerAuth": [] }],
+        "responses": {
+          "200": {
+            "description": "Profile data retrieved",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    { "$ref": "#/components/schemas/User" },
+                    {
+                      "type": "object",
+                      "properties": {
+                        "addresses": {
+                          "type": "array",
+                          "items": { "$ref": "#/components/schemas/Address" }
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "401": { "description": "Missing or invalid token" }
+        }
+      }
+    },
+    "/api/auth/addresses": {
+      "get": {
+        "summary": "List saved shipping addresses",
+        "security": [{ "BearerAuth": [] }],
+        "responses": {
+          "200": {
+            "description": "Saved addresses",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": { "$ref": "#/components/schemas/Address" }
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "summary": "Save a new shipping address",
+        "security": [{ "BearerAuth": [] }],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["full_name", "address_line1", "city", "state", "postal_code", "phone"],
+                "properties": {
+                  "full_name": { "type": "string" },
+                  "address_line1": { "type": "string" },
+                  "address_line2": { "type": "string" },
+                  "city": { "type": "string" },
+                  "state": { "type": "string" },
+                  "postal_code": { "type": "string" },
+                  "country": { "type": "string", "default": "USA" },
+                  "phone": { "type": "string" },
+                  "is_default": { "type": "boolean", "default": false }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Address added",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "message": { "type": "string" },
+                    "address": { "$ref": "#/components/schemas/Address" }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/products": {
+      "get": {
+        "summary": "List or search products",
+        "parameters": [
+          { "name": "category_id", "in": "query", "schema": { "type": "integer" } },
+          { "name": "search", "in": "query", "schema": { "type": "string" } },
+          { "name": "min_price", "in": "query", "schema": { "type": "number" } },
+          { "name": "max_price", "in": "query", "schema": { "type": "number" } },
+          { "name": "sort_by", "in": "query", "schema": { "type": "string", "enum": ["newest", "price_asc", "price_desc", "rating"] } }
+        ],
+        "responses": {
+          "200": {
+            "description": "Products matching filter criteria",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": { "$ref": "#/components/schemas/Product" }
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "summary": "Create a new product (multipart/form-data)",
+        "security": [{ "BearerAuth": [] }],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "type": "object",
+                "required": ["name", "title", "description", "price", "category_id"],
+                "properties": {
+                  "name": { "type": "string" },
+                  "title": { "type": "string" },
+                  "description": { "type": "string" },
+                  "price": { "type": "number" },
+                  "discount_price": { "type": "number" },
+                  "stock_count": { "type": "integer", "default": 0 },
+                  "category_id": { "type": "integer" },
+                  "brand": { "type": "string" },
+                  "SKU": { "type": "string" },
+                  "image": { "type": "string", "format": "binary" },
+                  "image_urls": { "type": "string", "description": "Comma separated list of remote image URLs" }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Product created",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "message": { "type": "string" },
+                    "product": { "$ref": "#/components/schemas/Product" }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/products/{product_id}": {
+      "get": {
+        "summary": "Fetch product details",
+        "parameters": [
+          { "name": "product_id", "in": "path", "required": true, "schema": { "type": "integer" } },
+          { "name": "session_id", "in": "query", "schema": { "type": "string" } }
+        ],
+        "responses": {
+          "200": {
+            "description": "Product data",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/Product" }
+              }
+            }
+          },
+          "404": { "description": "Product not found" }
+        }
+      },
+      "put": {
+        "summary": "Update product specifications",
+        "security": [{ "BearerAuth": [] }],
+        "parameters": [
+          { "name": "product_id", "in": "path", "required": true, "schema": { "type": "integer" } }
+        ],
+        "requestBody": {
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "name": { "type": "string" },
+                  "title": { "type": "string" },
+                  "description": { "type": "string" },
+                  "price": { "type": "number" },
+                  "discount_price": { "type": "number" },
+                  "stock_count": { "type": "integer" },
+                  "category_id": { "type": "integer" },
+                  "brand": { "type": "string" },
+                  "SKU": { "type": "string" },
+                  "image": { "type": "string", "format": "binary" }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": { "description": "Product updated" }
+        }
+      },
+      "delete": {
+        "summary": "Delete product from store catalogue",
+        "security": [{ "BearerAuth": [] }],
+        "parameters": [
+          { "name": "product_id", "in": "path", "required": true, "schema": { "type": "integer" } }
+        ],
+        "responses": {
+          "200": { "description": "Product deleted successfully" }
+        }
+      }
+    },
+    "/api/cart": {
+      "get": {
+        "summary": "View shopping cart contents",
+        "parameters": [
+          { "name": "session_id", "in": "query", "schema": { "type": "string" } }
+        ],
+        "responses": {
+          "200": {
+            "description": "Cart contents",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/Cart" }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "summary": "Add item to shopping cart",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["product_id"],
+                "properties": {
+                  "session_id": { "type": "string" },
+                  "product_id": { "type": "integer" },
+                  "quantity": { "type": "integer", "default": 1 }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": { "description": "Item added to cart" }
+        }
+      }
+    },
+    "/api/cart/{item_id}": {
+      "put": {
+        "summary": "Update item quantity in cart",
+        "parameters": [
+          { "name": "item_id", "in": "path", "required": true, "schema": { "type": "integer" } },
+          { "name": "session_id", "in": "query", "schema": { "type": "string" } }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["quantity"],
+                "properties": {
+                  "quantity": { "type": "integer" }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": { "description": "Cart item updated" }
+        }
+      },
+      "delete": {
+        "summary": "Remove item from cart",
+        "parameters": [
+          { "name": "item_id", "in": "path", "required": true, "schema": { "type": "integer" } },
+          { "name": "session_id", "in": "query", "schema": { "type": "string" } }
+        ],
+        "responses": {
+          "200": { "description": "Item removed" }
+        }
+      }
+    },
+    "/api/orders": {
+      "get": {
+        "summary": "List history of customer orders or seller items",
+        "security": [{ "BearerAuth": [] }],
+        "responses": {
+          "200": {
+            "description": "List of orders",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": { "$ref": "#/components/schemas/Order" }
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "summary": "Checkout and place order",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["payment_method"],
+                "properties": {
+                  "session_id": { "type": "string" },
+                  "shipping_address_id": { "type": "integer" },
+                  "shipping_address": {
+                    "type": "object",
+                    "properties": {
+                      "full_name": { "type": "string" },
+                      "address_line1": { "type": "string" },
+                      "address_line2": { "type": "string" },
+                      "city": { "type": "string" },
+                      "state": { "type": "string" },
+                      "postal_code": { "type": "string" },
+                      "country": { "type": "string" },
+                      "phone": { "type": "string" }
+                    }
+                  },
+                  "payment_method": { "type": "string", "default": "card" }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Order created successfully",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "message": { "type": "string" },
+                    "order_id": { "type": "integer" },
+                    "tracking_number": { "type": "string" },
+                    "total_amount": { "type": "number" }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/orders/track/{tracking_number}": {
+      "get": {
+        "summary": "Track shipment status using tracking code",
+        "parameters": [
+          { "name": "tracking_number", "in": "path", "required": true, "schema": { "type": "string" } }
+        ],
+        "responses": {
+          "200": {
+            "description": "Order tracking details",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/Order" }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

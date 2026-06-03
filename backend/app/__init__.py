@@ -43,6 +43,52 @@ def create_app():
     def health():
         return jsonify({'status': 'healthy', 'database': app.config['SQLALCHEMY_DATABASE_URI'].split('://')[0]}), 200
         
+    # API Documentation route
+    @app.route('/docs', methods=['GET'])
+    def swagger_ui():
+        html = """
+        <!DOCTYPE html>
+        <html lang="en">
+        <head>
+          <meta charset="utf-8" />
+          <meta name="viewport" content="width=device-width, initial-scale=device-width, initial-scale=1" />
+          <meta name="description" content="Shop&Chil API Documentation" />
+          <title>Shop&Chil API Documentation</title>
+          <link rel="stylesheet" href="https://unpkg.com/swagger-ui-dist@5.11.0/swagger-ui.css" />
+        </head>
+        <body>
+          <div id="swagger-ui"></div>
+          <script src="https://unpkg.com/swagger-ui-dist@5.11.0/swagger-ui-bundle.js" charset="UTF-8"></script>
+          <script src="https://unpkg.com/swagger-ui-dist@5.11.0/swagger-ui-standalone-preset.js" charset="UTF-8"></script>
+          <script>
+            window.onload = () => {
+              window.ui = SwaggerUIBundle({
+                url: '/docs/swagger.json',
+                dom_id: '#swagger-ui',
+                deepLinking: true,
+                presets: [
+                  SwaggerUIBundle.presets.apis,
+                  SwaggerUIStandalonePreset
+                ],
+                layout: "BaseLayout"
+              });
+            };
+          </script>
+        </body>
+        </html>
+        """
+        return html
+
+    @app.route('/docs/swagger.json', methods=['GET'])
+    def swagger_json():
+        import json
+        try:
+            with open(os.path.join(app.root_path, 'swagger.json'), 'r') as f:
+                data = json.load(f)
+            return jsonify(data)
+        except Exception as e:
+            return jsonify({"error": str(e)}), 500
+        
     # Auto-create tables (SQLite fallback makes this easy for immediate local development)
     with app.app_context():
         db.create_all()
